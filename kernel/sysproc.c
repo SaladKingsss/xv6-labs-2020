@@ -95,3 +95,15 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+// kernel/sysproc.c
+uint64
+sys_trace(void)
+{
+  int mask;
+  if(argint(0, &mask) < 0) { // retrive first argument to mask
+    return -1;
+  }
+  myproc()->trace_mask = mask; // 将获取的argument也就是mask存储到当前进程。
+  return 0;
+}

@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "sysinfo.h"  //here!!!
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -480,6 +481,25 @@ sys_pipe(void)
     p->ofile[fd1] = 0;
     fileclose(rf);
     fileclose(wf);
+    return -1;
+  }
+  return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  uint64 info;
+  struct sysinfo si;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &info) < 0) { // 获取指向传入的第一个参数的指针（0代表第一个参数，以此类推）
+    return -1;
+  }
+  si.freemem = collect_mem(); // 存入结构体si，以便将结构体si整体copyout
+  si.nproc = collect_proc();
+	// 调用copyout将si结构体copy到info指向的地址（用户空间），也就是从内核空间带用户空间
+  if(copyout(p->pagetable, info, (char *)&si, sizeof(si)) < 0) {
     return -1;
   }
   return 0;

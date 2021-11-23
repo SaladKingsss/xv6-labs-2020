@@ -130,6 +130,23 @@ found:
   return p;
 }
 
+
+
+uint64
+collect_proc(void) // ***here!!!!!***
+{
+  struct proc *p;
+  uint64 proc_num = 0;
+  for(p = proc; p < &proc[NPROC]; ++p) {
+    if(p->state != UNUSED) {
+      ++proc_num;
+    }
+  }
+  return proc_num;
+}
+
+
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
@@ -294,6 +311,8 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  np->trace_mask = p->trace_mask; // copy trace_mask。***here！！！！***
 
   release(&np->lock);
 
