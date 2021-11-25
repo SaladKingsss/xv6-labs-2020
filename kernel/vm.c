@@ -440,3 +440,38 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+
+
+//here!!!
+
+void vmprint_helper(pagetable_t pagetable, int level)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for (int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    // 合法页面
+    if (pte & PTE_V)
+    {
+      printf("..");
+      for (int j = 0; j < level; j++) //添加层数
+        printf(" ..");
+      uint64 child = PTE2PA(pte);
+      printf("%d: pte %p pa %p\n", i, pte, child);
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) //判断结束条件
+        vmprint_helper((pagetable_t)child, level + 1); //层数增加，处处是精华...写汉诺塔的知识都忘了吗
+    }
+  }
+}
+
+
+int vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_helper(pagetable, 0);
+  return 0;
+}
+
+
+
