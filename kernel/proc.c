@@ -34,12 +34,16 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
+      //这里删除了为所有进程预分配内核栈的代码，变为创建进程的时候再创建内核栈
+      //removed this part, added them to allocproc()  (here!!!)
+        /*
       char *pa = kalloc();
       if(pa == 0)
         panic("kalloc");
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
+  */
   }
   kvminithart();
 }
@@ -102,6 +106,17 @@ allocproc(void)
       release(&p->lock);
     }
   }
+  //something should added here...?
+  /*
+      char *pa = kalloc();
+      if(pa == 0)
+        panic("kalloc");
+      uint64 va = KSTACK((int) (p - proc));
+      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      p->kstack = va;
+  */
+
+
   return 0;
 
 found:
@@ -121,6 +136,23 @@ found:
     return 0;
   }
 
+
+  /*
+  new part here!!!!!!!!!
+  */
+  // 为新进程创建独立的内核页表，并将内核所需要的各种映射添加到新页表上
+  p->kernelpgtbl = kpagetable_alloc();
+
+  // 分配一个物理页，作为新进程的内核栈使用
+  char *pa = kalloc();
+  if (pa == 0)
+    panic("kalloc");
+  uint64 va = KSTACK((int)0);    // 将内核栈映射到固定虚拟地址0
+  kvmmap(p->kernelpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
+
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +160,28 @@ found:
   p->context.sp = p->kstack + PGSIZE;
 
   return p;
+}
+
+void kvm_free_kernelpgtbl(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for (int i = 0; i < 512; i++)
+  {
+    pte_t pte = pagetable[i];
+    // 合法页面 并且 不是第三级页表（不可读且不可写且不可执行 即是 根页表或第二级页表）
+    // 非合法页面不会分配物理内存，因此不必进入下一级页表
+    // 如果该页表项指向更低一级的页表，递归释放低一级页表及其页表项
+    // 但是只需要释放进程的一二级内核页表，不需要释放实际物理内存
+    // 如果该页表项指向更低一级的页表，递归释放低一级页表及其页表项
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0)
+    {
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      kvm_free_kernelpgtbl((pagetable_t)child);
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void *)pagetable); // 释放当前级别页表所占用空间
 }
 
 // free a proc structure and the data hanging from it,
@@ -150,7 +204,23 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  // 释放进程的内核栈
+  void *kstack_pa = (void *)kvmpa(p->kernelpgtbl, p->kstack);
+  kfree(kstack_pa);
+  p->kstack = 0;
+
+  // 注意：此处不能使用 proc_freepagetable，因为其不仅会释放页表本身，还会把页表内所有的叶节点对应的物理页也释放掉。
+  // 这会导致内核运行所需要的关键物理页被释放，从而导致内核崩溃。
+  // 这里使用 kfree(p->kernelpgtbl) 也是不足够的，因为这只释放了**一级页表本身**，而不释放二级以及三级页表所占用的空间。
+
+  // 递归释放进程独享的页表，释放页表本身所占用的空间，但【不释放页表指向的物理页】
+  kvm_free_kernelpgtbl(p->kernelpgtbl);
+  p->kernelpgtbl = 0;
+  p->state = UNUSED;
 }
+
+
 
 // Create a user page table for a given process,
 // with no user memory, but with trampoline pages.
@@ -220,6 +290,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  uvmcopy_u2k(p->pagetable, p->kernelpgtbl, 0, p->sz); // 同步程序内存映射到进程内核页表中
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -242,12 +313,22 @@ growproc(int n)
   struct proc *p = myproc();
 
   sz = p->sz;
-  if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+  if(n > 0){//扩大
+    uint64 newsz = 0;
+    if((newsz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
-  } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    //添加：
+    if(uvmcopy_u2k(p->pagetable, p->kernelpgtbl, sz, n) != 0){
+      uvmdealloc(p->pagetable, newsz, sz);
+      return -1;
+    }
+    sz = newsz; //扩大映射
+
+  } else if(n < 0){//缩小
+    uvmdealloc(p->pagetable, sz, sz + n);
+    // 内核页表中的映射同步缩小
+    sz = kvmdealloc(p->kernelpgtbl, sz, sz + n);
   }
   p->sz = sz;
   return 0;
@@ -268,7 +349,8 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 || 
+     uvmcopy_u2k(np->pagetable, np->kernelpgtbl, 0, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -473,7 +555,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换到进程独立的内核页表
+        w_satp(MAKE_SATP(p->kernelpgtbl));
+        sfence_vma(); // 清除快表缓存
+
+        // 调度，执行进程
         swtch(&c->context, &p->context);
+
+        // 切换回全局内核页表
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
