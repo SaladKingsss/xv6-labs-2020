@@ -113,6 +113,20 @@ found:
     return 0;
   }
 
+  //这里别忘了初始化啊，我查了一年
+  // Allocate a alarm_trapframe page.分配alarm_trapframe
+  if ((p->alarm_trapframe = (struct trapframe *)kalloc()) == 0)
+  {
+    release(&p->lock);
+    return 0;
+  }
+
+  //  初始化属性
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  p->alarm_ticks = 0;
+  p->is_alarming = 0;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,8 +153,15 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  // 加入对相关变量的释放
+  if (p->alarm_trapframe) // 释放alarm_trapframe
+    kfree((void *)p->alarm_trapframe);
+  p->alarm_trapframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -150,6 +171,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  p->alarm_ticks = 0;
+  p->is_alarming = 0;
 }
 
 // Create a user page table for a given process,

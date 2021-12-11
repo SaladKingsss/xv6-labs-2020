@@ -77,8 +77,19 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if (which_dev == 2)
+  {
+    if ((p->alarm_interval != 0) && (++p->alarm_ticks == p->alarm_interval) && (p->is_alarming == 0))
+    {
+      *p->alarm_trapframe = *p->trapframe; // 备份被中断代码的trapframe
+      //memmove(p->alarm_trapframe, p->trapframe, sizeof(struct trapframe));
+      p->trapframe->epc = (uint64)p->alarm_handler; // 跳转
+      p->alarm_ticks = 0;                           // 恢复ticks（计数器恢复到0）
+      p->is_alarming = 1;                        //未返回，由sys_sigreturn函数置1
+    }
+
     yield();
+  }
 
   usertrapret();
 }
