@@ -38,7 +38,7 @@ usertrap(void)
 {
   int which_dev = 0;
 
-  if((r_sstatus() & SSTATUS_SPP) != 0)
+  if ((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // send interrupts and exceptions to kerneltrap(),
@@ -46,14 +46,15 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+
+  if (r_scause() == 8)
+  {
     // system call
 
-    if(p->killed)
+    if (p->killed)
       exit(-1);
 
     // sepc points to the ecall instruction,
@@ -65,19 +66,39 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  }
+  else if ((which_dev = devintr()) != 0)
+  {
     // ok
-  } else {
+  }
+  //因为这个错误是store造成的（对应的scause=15）
+  //所以我们要在usertrap中加入一种15的情况
+  //首先从stval处获得错误指令的虚拟地址
+  //然后分配一个物理内存page，把虚拟地址向下取整
+  //然后和物理内存做好对应关系，加入到pagetable中。
+
+  //如果进程在比 sbrk() 分配的任何内存地址高的虚拟内存地址上出现页面错误，则终止该进程。
+  //其他的查询地址在uvmcheck中，内容包括：
+  //地址需要小于sz；
+  //处理用户堆栈下方无效页面上的错误；
+
+  else if ((r_scause() == 13 || r_scause() == 15) && uvmcheck(r_stval()))
+  {
+    uint64 va = r_stval();
+    uvmlazyalloc(va);
+  }
+  else
+  {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
   }
 
-  if(p->killed)
+  if (p->killed)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if (which_dev == 2)
     yield();
 
   usertrapret();

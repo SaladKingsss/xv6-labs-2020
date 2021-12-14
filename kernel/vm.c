@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -181,9 +183,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue; // 如果页表项不存在，跳过当前地址 （原本是直接panic）
+    //处理进程将有效地址从 sbrk() 传递给系统调用（例如读取或写入）但尚未分配该地址的内存的情况
+    //因为这里没有实际的物理内存可以释放
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +319,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue; // 如果页表项不存在，跳过当前地址 （原本是直接panic）
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue; // 如果页表项不存在，跳过当前地址 （原本是直接panic）
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -356,6 +360,9 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
 
+  if (uvmcheck(dstva))
+    uvmlazyalloc(dstva);
+
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
@@ -380,6 +387,9 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+
+  if (uvmcheck(srcva))
+    uvmlazyalloc(srcva);
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
@@ -438,5 +448,41 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+//什么种类的虚拟地址需要lazy allocation
+//如果进程在比 sbrk() 分配的任何内存地址高的虚拟内存地址上出现页面错误，则终止该进程。
+//Handle faults on the invalid page below the user stack.   这里到底应该改什么？
+uint64 uvmcheck(uint64 va)
+{
+  pte_t *pte;
+  struct proc *p = myproc();
+   //需要include proc.h
+  return (va < p->sz) 
+  && (PGROUNDDOWN(va) != r_sp())
+  && (((pte = walk(p->pagetable, va, 0)) == 0) || ((*pte & PTE_V) == 0)); 
+}
+
+void uvmlazyalloc(uint64 va)
+{
+  struct proc *p = myproc();
+  //printf("page fault %p\n", va);
+  uint64 ka = (uint64)kalloc();
+  if (ka == 0) //处理内存不足
+  {
+    printf("lazy alloc: out of memory\n");
+    p->killed = 1;
+  }
+  else
+  {
+    memset((void *)ka, 0, PGSIZE); //初始化为0（实际是复制字符）
+    va = PGROUNDDOWN(va);
+    if (mappages(p->pagetable, va, PGSIZE, ka, PTE_W | PTE_U | PTE_R) != 0)
+    {
+      printf("lazy alloc: failed to map page\n");
+      kfree((void *)ka);
+      p->killed = 1;
+    }
   }
 }

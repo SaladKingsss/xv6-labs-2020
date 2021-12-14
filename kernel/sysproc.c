@@ -47,8 +47,13 @@ sys_sbrk(void)
   if(argint(0, &n) < 0)
     return -1;
   addr = myproc()->sz;
-  if(growproc(n) < 0)
-    return -1;
+  if (n < 0)  //负数
+  {
+    uvmdealloc(myproc()->pagetable, myproc()->sz, myproc()->sz + n); // 如果是缩小空间，则马上释放
+  }
+  myproc()->sz = myproc()->sz + n;  //(扩大的话则为lazy allocation)
+  // if(growproc(n) < 0)
+  //  return -1;
   return addr;
 }
 
