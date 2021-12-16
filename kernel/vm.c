@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -299,6 +301,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+// 复制页表和物理内存
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -311,7 +314,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,14 +321,25 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    // 清除父进程的 PTE_W 标志位，设置 PTE_COW 标志位表示是一个懒复制页（多个进程引用同个物理页）
+    *pte = (*pte & ~PTE_W) | PTE_COW;
     flags = PTE_FLAGS(*pte);
+
+    /*
     if((mem = kalloc()) == 0)
       goto err;
     memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    */
+   
+
+    //此处有修改 子进程页表也指向pa
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      //kfree(mem);
       goto err;
     }
+
+    //增加一次引用次数？
+    addref((void *)pa);
   }
   return 0;
 
@@ -355,6 +368,8 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  if (uvmcheckcowpage(dstva))
+    uvmcowcopy(dstva);
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -439,4 +454,44 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+//判断是否是copy on write page
+uint64 uvmcheckcowpage(uint64 va){
+  pte_t * pte;
+  struct proc * p = myproc();
+
+  return va < p->sz   // 在进程内存范围内
+         && ((pte = walk(p->pagetable, va, 0)) != 0) 
+         && (*pte & PTE_V)    // 页表项存在
+         && (*pte & PTE_COW); // 页是一个懒复制页
+}
+
+//使用 kalloc() 分配一个新页面，将旧页面复制到新页面，将新页面安装到 PTE 中并设置PTE_W (设置为可写)。
+uint64 uvmcowcopy(uint64 va)
+{
+  pte_t *pte;
+  struct proc *p = myproc();
+  uint64 flags;
+
+  if ((pte = walk(p->pagetable, va, 0)) == 0)
+    panic("uvmcowcopy: walk");
+
+  //1. 使用 kalloc() 分配一个新物理页面，将旧页面复制到新页面
+  uint64 pa = PTE2PA(*pte);
+  uint64 newpage = (uint64)verycomplexalloc((void *)pa); // 将一个懒复制的页引用变为一个实复制的页
+  if (newpage == 0)
+    return -1;
+
+  //2. (反向)设置父进程和子进程的 PTE_W 标志位(只需要flags)
+  *pte = (*pte | PTE_W) & ~PTE_COW;
+  flags = PTE_FLAGS(*pte);
+
+  //3. 将新页面安装到 PTE 中（pte是条目，那我们相当于修改了这个条目？把新的引用规则加入进来）
+  uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0); //取消这个引用
+  if (mappages(p->pagetable, va, 1, newpage, flags) == -1)
+  { //添加一个新的引用
+    panic("uvmcowcopy: mappages");
+  }
+  return 0;
 }

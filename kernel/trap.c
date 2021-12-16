@@ -67,21 +67,36 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
   }
+  //为什么这里会有一个注释？
+  //fork 时就不会立刻复制内存，只会创建一个映射了。
+  //这时候如果尝试修改懒复制的页，会出现 page fault 被 usertrap() 捕获。
+  //接下来需要在 usertrap() 中捕捉这个 page fault，并在尝试修改页的时候，执行实复制操作。
 
-  if(p->killed)
-    exit(-1);
+  //需要检测是否是cow 物理页
+  else if ((r_scause() == 13 || r_scause() == 15) && uvmcheckcowpage(r_stval()))
+  { // copy-on-write
+    if (uvmcowcopy(r_stval()) == -1)
+    { // 如果内存不足，则杀死进程
+      p->killed = 1;
+    }
+  }
+    else
+    {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
 
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
+    if (p->killed)
+      exit(-1);
 
-  usertrapret();
-}
+    // give up the CPU if this is a timer interrupt.
+    if (which_dev == 2)
+      yield();
+
+    usertrapret();
+  }
 
 //
 // return to user space

@@ -9,6 +9,18 @@
 #include "riscv.h"
 #include "defs.h"
 
+struct spinlock pgreflock; // 用于 pageref 数组的锁，防止竞态条件引起内存泄漏
+
+// 用于访问物理页引用计数数组
+#define PA2PGREF_ID(p) (((p)-KERNBASE) / PGSIZE)  //公式
+#define PGREF_MAX_ENTRIES PA2PGREF_ID(PHYSTOP)    //最大值
+
+// 通过物理地址获得引用计数
+int pageref[PGREF_MAX_ENTRIES]; // 从 KERNBASE 开始到 PHYSTOP 之间的每个物理页的引用计数
+#define PA2PGREF(p) pageref[PA2PGREF_ID((uint64)(p))]   //套公式
+
+
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -27,6 +39,7 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&pgreflock, "pgref"); // 初始化锁
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -48,18 +61,25 @@ kfree(void *pa)
 {
   struct run *r;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
+  acquire(&pgreflock);
+  if (--PA2PGREF(pa) <= 0)//只加了一个测试条件 其他的都原封不动扔进循环里面
+  {
+    // 释放的时候引用次数-1
+    // 当页面的引用计数小于等于 0 的时候，释放页面
+    // Fill with junk to catch dangling refs.
+    memset(pa, 1, PGSIZE);
 
-  r = (struct run*)pa;
+    r = (struct run *)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+    acquire(&kmem.lock);
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+  }
+  release(&pgreflock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -76,7 +96,47 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  if (r)
+  {
+    memset((char *)r, 5, PGSIZE); // fill with junk
+    // 新分配的物理页的引用计数为 1
+    // (这里无需加锁)
+    PA2PGREF(r) = 1;
+  }
   return (void*)r;
+}
+
+//需要写一个数组。看起来还挺麻烦的
+void addref(void *pa){
+  acquire(&pgreflock);
+  PA2PGREF(pa)++;
+  release(&pgreflock);
+}
+
+// 将一个懒复制的页引用变为一个实复制的页
+// 使用 kalloc() 分配一个新物理页面，将旧页面复制到新页面
+void *verycomplexalloc(void *pa)
+{
+  acquire(&pgreflock);
+
+  if (PA2PGREF(pa) <= 1)
+  { // 只有 1 个引用，无需复制
+    release(&pgreflock);
+    return pa;
+  }
+
+  uint64 newpa = (uint64)kalloc();
+  if (newpa == 0)
+  {
+    release(&pgreflock);
+    return 0; // out of memory
+  }
+
+  memmove((void *)newpa, (void *)pa, PGSIZE);
+
+  // 旧页的引用减 1
+  PA2PGREF(pa)--;
+
+  release(&pgreflock);
+  return (void *)newpa;
 }
